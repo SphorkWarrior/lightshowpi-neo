@@ -10,14 +10,14 @@ User=pi
 Group=pi
 
 # Environment
-Environment="SYNCHRONIZED_LIGHTS_HOME=/home/pi/lightshowpi"
-Environment="PATH=/home/pi/miniconda3/envs/lightshowpi-neo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="SYNCHRONIZED_LIGHTS_HOME=/home/pi/lightshowpi-neo-neo"
+Environment="PATH=/home/pi/lightshowpi-neo-neo/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Working directory
-WorkingDirectory=/home/pi/lightshowpi
+WorkingDirectory=/home/pi/lightshowpi-neo-neo
 
 # Start command
-ExecStart=/home/pi/miniconda3/envs/lightshowpi-neo/bin/python -m api.main
+ExecStart=/home/pi/lightshowpi-neo-neo/venv/bin/python -m api.main
 
 # Restart policy
 Restart=on-failure

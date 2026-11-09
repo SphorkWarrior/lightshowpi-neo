@@ -261,6 +261,6 @@ if __name__ == "__main__":
         "api.main:app",
         host=config.host,
         port=config.port,
-        reload=True,  # Remove in production
+        reload=False,  # Remove in production
         log_level="info"
     )

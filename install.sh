@@ -53,7 +53,7 @@ if [ -f /proc/cpuinfo ]; then
         log "Detected Raspberry Pi 5 - supported!"
     elif echo "$MODEL" | grep -qi "Raspberry Pi 4"; then
         log "Detected Raspberry Pi 4 - supported!"
-    elif echo "$MODEL" | grep -qi "Raspberry Pi 3"; then
+    elif echo "$MODEL" | grep -qiE "Raspberry Pi 3|Raspberry Pi Zero 2"; then
         log "Detected Raspberry Pi 3 - supported!"
     else
         # Try old format (Hardware)

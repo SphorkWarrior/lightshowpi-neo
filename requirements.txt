@@ -6,7 +6,7 @@
 # ----------------------------------------------------------------------------
 # Core Audio & Signal Processing
 # ----------------------------------------------------------------------------
-numpy>=1.24.0,<2.0.0  # FFT calculations, array operations, audio processing
+numpy>=1.24.0  # FFT calculations, array operations, audio processing
 audioread>=3.0.0  # Cross-library audio decoding (MP3, WAV, FLAC, OGG, M4A/AAC via ffmpeg)
 pyalsaaudio>=0.10.0  # ALSA audio input/output (requires libasound2-dev or alsa-lib)
 mutagen>=1.47.0  # Audio file metadata reading (ID3, etc.)

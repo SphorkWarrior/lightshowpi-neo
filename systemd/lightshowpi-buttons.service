@@ -12,19 +12,19 @@ User=root
 Group=gpio
 
 # Environment
-Environment="SYNCHRONIZED_LIGHTS_HOME=/home/pi/lightshowpi"
-Environment="PATH=/home/pi/miniconda3/envs/lightshowpi-neo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="SYNCHRONIZED_LIGHTS_HOME=/home/pi/lightshowpi-neo-neo"
+Environment="PATH=/home/pi/lightshowpi-neo-neo/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Working directory
-WorkingDirectory=/home/pi/lightshowpi
+WorkingDirectory=/home/pi/lightshowpi-neo-neo
 
 # Start command
 # Mode: auto (try API, fall back to direct if unavailable)
 # Log Level: INFO (change to DEBUG for troubleshooting)
-ExecStart=/home/pi/miniconda3/envs/lightshowpi-neo/bin/python py/buttonmanager.py --mode auto --log-level INFO
+ExecStart=/home/pi/lightshowpi-neo-neo/venv/bin/python py/buttonmanager.py --mode auto --log-level INFO
 
 # Stop command (cleanup GPIO resources)
-ExecStop=/home/pi/miniconda3/envs/lightshowpi-neo/bin/python py/buttonmanager.py --cleanup
+ExecStop=/home/pi/lightshowpi-neo-neo/venv/bin/python py/buttonmanager.py --cleanup
 
 # Restart policy
 Restart=on-failure

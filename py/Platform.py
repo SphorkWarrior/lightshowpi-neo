@@ -84,7 +84,7 @@ def pi_version():
             return PI_5
         elif 'Pi 4' in model or 'Raspberry Pi 4' in model:
             return PI_4
-        elif 'Pi 3' in model or 'Raspberry Pi 3' in model:
+        elif 'Pi 3' in model or 'Raspberry Pi 3' in model or 'Zero 2' in model:
             return PI_3
         # If it's Pi 1, 2, Zero, etc. - return None (unsupported)
         return None

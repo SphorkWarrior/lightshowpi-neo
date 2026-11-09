@@ -142,7 +142,7 @@ def wiringPiSetupGpio():
     global _chip_handle, _pin_mode
     try:
         _chip_handle = lgpio.gpiochip_open(0)
-        _pin_mode = 'bcm'  # Use BCM pin numbering
+        _pin_mode = 'wiringpi'  # Use BCM pin numbering
         logging.debug(f"GPIO initialized with lgpio, handle: {_chip_handle}, mode: BCM")
     except Exception as e:
         logging.error(f"Failed to initialize GPIO: {e}")
