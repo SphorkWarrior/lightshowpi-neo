@@ -15,8 +15,10 @@ from enum import Enum
 class LightshowState(str, Enum):
     """Current state of the lightshow system."""
     IDLE = "idle"
+    STARTING = "starting"
     SCHEDULED = "scheduled"
     PAUSED = "paused"
+    STOPPING = "stopping"
     STOPPED = "stopped"
     PLAYING = "playing"
     TEST_MODE = "test_mode"
@@ -37,7 +39,13 @@ class LightshowMode(str, Enum):
     STREAM_IN = "stream-in"  # Stream input mode
 
 
-class ClientStatus(str, Enum):
+class SequenceMode(str, Enum):
+    """Light sequence mode for a song."""
+    FFT = "fft"
+    CUSTOM = "custom"
+
+
+class ClientStatusEnum(str, Enum):
     """Status of a client Pi."""
     ONLINE = "online"
     OFFLINE = "offline"
@@ -97,7 +105,7 @@ class ClientResponse(BaseModel):
     auth_key: str  # Only returned on creation
     ip_address: Optional[str] = None
     last_seen: Optional[datetime] = None
-    status: ClientStatus
+    status: ClientStatusEnum
     created_at: datetime
 
 
@@ -106,7 +114,7 @@ class ClientStatus(BaseModel):
     id: str
     name: str
     ip_address: Optional[str] = None
-    status: ClientStatus
+    status: ClientStatusEnum
     last_seen: Optional[datetime] = None
 
 
@@ -165,33 +173,30 @@ class ScheduledEventResponse(BaseModel):
     job_id: str
 
 
-# Playlist models
-class PlaylistCreate(BaseModel):
-    """Request model for creating a new playlist."""
-    name: str = Field(..., min_length=1, max_length=100)
-
-
-class PlaylistResponse(BaseModel):
-    """Response model for playlist data."""
-    id: int
-    name: str
-    file_path: str
-    is_active: bool
-    song_count: int = 0
-    created_at: datetime
-
-
 # Song models
 class SongResponse(BaseModel):
     """Response model for song data."""
     id: int
     playlist_id: Optional[int] = None
     file_path: str
+    filename: Optional[str] = None
     title: Optional[str] = None
     artist: Optional[str] = None
     duration: Optional[float] = None
     file_size: Optional[int] = None
-    uploaded_at: datetime
+    sequence_mode: str = "fft"
+    sequence_timing: int = 50
+    has_custom_sequence: bool = False
+    has_fft_cache: bool = False
+    uploaded_at: Optional[datetime] = None
+
+
+class SongUpdate(BaseModel):
+    """Request model for updating song metadata or light sequence mode."""
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    sequence_mode: Optional[SequenceMode] = None
+    sequence_timing: Optional[int] = Field(None, ge=10, le=2000)
 
 
 class SongUpload(BaseModel):
@@ -201,11 +206,70 @@ class SongUpload(BaseModel):
     playlist_id: Optional[int] = None
 
 
+# Custom Light Sequence models
+class SequenceData(BaseModel):
+    """Custom light sequence payload for a song."""
+    song_id: Optional[int] = None
+    timing_ms: int = Field(default=50, ge=10, le=2000)
+    num_channels: int = Field(default=8, ge=1, le=64)
+    brightness_range: int = Field(default=255, ge=1, le=255)
+    sequence_mode: Optional[SequenceMode] = None
+    steps: List[List[int]] = Field(default_factory=list)
+
+
+class SequenceGenerateRequest(BaseModel):
+    """Request model for generating a custom sequence from FFT or a pattern."""
+    timing_ms: int = Field(default=50, ge=10, le=2000)
+    activate_custom: bool = True
+
+
+# Playlist models
+class PlaylistCreate(BaseModel):
+    """Request model for creating a new playlist."""
+    name: str = Field(..., min_length=1, max_length=100)
+    song_ids: Optional[List[int]] = None
+    is_active: bool = False
+
+
+class PlaylistUpdate(BaseModel):
+    """Request model for updating a playlist."""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    song_ids: Optional[List[int]] = None
+    is_active: Optional[bool] = None
+
+
+class PlaylistSongAdd(BaseModel):
+    """Request model for adding a song to a playlist."""
+    song_id: int
+
+
+class PlaylistReorder(BaseModel):
+    """Request model for reordering songs in a playlist."""
+    song_ids: List[int]
+
+
+class PlaylistResponse(BaseModel):
+    """Response model for playlist summary."""
+    id: int
+    name: str
+    file_path: str
+    is_active: bool
+    song_count: int = 0
+    created_at: Optional[datetime] = None
+
+
+class PlaylistDetailResponse(PlaylistResponse):
+    """Response model for playlist with ordered songs."""
+    songs: List[SongResponse] = []
+
+
 # Lightshow control models
 class LightshowStart(BaseModel):
     """Request model for starting the lightshow."""
     mode: Optional[LightshowMode] = None
     playlist: Optional[str] = None
+    playlist_id: Optional[int] = None
+    song_id: Optional[int] = None
     resume_schedule: bool = True
 
 

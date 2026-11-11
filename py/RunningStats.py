@@ -20,7 +20,7 @@ numpy: for calculation
     http://www.numpy.org/
 """
 
-from numpy import *
+import numpy as np
 
 
 class Stats(object):
@@ -31,22 +31,21 @@ class Stats(object):
         :type length: int
         """
         self.length = length
-        self.clear()
         self.sample_count = 0
-        self.old_mean = zeros(length, dtype='float32')
-        self.old_std = zeros(length, dtype='float32')
-        self.new_mean = zeros(length, dtype='float32')
-        self.new_std = zeros(length, dtype='float32')
+        self.old_mean = np.zeros(length, dtype='float32')
+        self.old_std = np.zeros(length, dtype='float32')
+        self.new_mean = np.zeros(length, dtype='float32')
+        self.new_std = np.zeros(length, dtype='float32')
 
     def clear(self):
         self.sample_count = 0
-        self.old_mean = zeros(self.length, dtype='float32')
-        self.old_std = zeros(self.length, dtype='float32')
-        self.new_mean = zeros(self.length, dtype='float32')
-        self.new_std = zeros(self.length, dtype='float32')
+        self.old_mean.fill(0.0)
+        self.old_std.fill(0.0)
+        self.new_mean.fill(0.0)
+        self.new_std.fill(0.0)
 
     def preload(self, mean_value, std_value, sample_count=2):
-        """Add a starting samples to the running standard deviation and mean_value
+        """Add starting samples to the running standard deviation and mean_value
         
         This data does not need to be accurate.  It is only a base starting
         point for our light show.  With out preloading some values the show 
@@ -63,10 +62,10 @@ class Stats(object):
         if len(mean_value) == self.length and len(
                 std_value) == self.length and sample_count > 1 and self.sample_count == 0:
             # cast all arrays to numpy just to make sure the data type is correct
-            self.new_mean = array(mean_value, dtype='float32')
-            self.new_std = array(std_value, dtype='float32')
-            self.old_mean = array(mean_value, dtype='float32')
-            self.old_std = array(std_value, dtype='float32')
+            self.new_mean = np.array(mean_value, dtype='float32')
+            self.new_std = np.array(std_value, dtype='float32')
+            self.old_mean = np.array(mean_value, dtype='float32')
+            self.old_std = np.array(std_value, dtype='float32')
             self.sample_count = sample_count
 
     def push(self, data):
@@ -80,11 +79,12 @@ class Stats(object):
 
         if self.sample_count == 1:
             self.old_mean = self.new_mean
-            self.new_mean = data
-            self.old_std = zeros(length, dtype='float32')
+            self.new_mean = np.asarray(data, dtype='float32')
+            self.old_std = np.zeros(self.length, dtype='float32')
         else:
-            self.new_mean = self.old_mean + (data - self.old_mean) / self.sample_count
-            self.new_std = self.old_std + (data - self.old_mean) * (data - self.new_mean)
+            delta = data - self.old_mean
+            self.new_mean = self.old_mean + delta / self.sample_count
+            self.new_std = self.old_std + delta * (data - self.new_mean)
 
             # set up for next iteration
             self.old_mean = self.new_mean
@@ -115,7 +115,7 @@ class Stats(object):
         if self.sample_count > 1:
             return self.new_std / (self.sample_count - 1.0)
         else:
-            return zeros(length, dtype='float32')
+            return np.zeros(self.length, dtype='float32')
 
     def std(self):
         """Get the current standard deviation 
@@ -123,4 +123,4 @@ class Stats(object):
         :return: current standard deviation
         :rtype: numpy array
         """
-        return sqrt(self.variance())
+        return np.sqrt(self.variance())

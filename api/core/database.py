@@ -25,7 +25,7 @@ class Database:
         Args:
             db_path: Path to SQLite database file. If None, uses default location.
         """
-        if db_path is None:
+        if not db_path:
             # Default to SYNCHRONIZED_LIGHTS_HOME/data/lightshowpi.db
             home = os.getenv("SYNCHRONIZED_LIGHTS_HOME")
             if not home:
@@ -46,14 +46,10 @@ class Database:
 
         Yields:
             sqlite3.Connection: Database connection
-
-        Example:
-            with db.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT * FROM users")
         """
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row  # Return rows as dictionaries
+        conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
             conn.commit()
@@ -128,8 +124,24 @@ class Database:
                     artist TEXT,
                     duration REAL,
                     file_size INTEGER,
+                    sequence_mode TEXT DEFAULT 'fft',
+                    sequence_timing INTEGER DEFAULT 50,
+                    has_custom_sequence BOOLEAN DEFAULT 0,
                     uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+                    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE SET NULL
+                )
+            """)
+
+            # Playlist-Songs junction table for ordered multi-playlist support
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS playlist_songs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    playlist_id INTEGER NOT NULL,
+                    song_id INTEGER NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+                    FOREIGN KEY (song_id) REFERENCES songs(id) ON DELETE CASCADE,
+                    UNIQUE(playlist_id, song_id)
                 )
             """)
 
@@ -189,6 +201,11 @@ class Database:
                 ON system_events(event_type)
             """)
 
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_playlist_songs_playlist
+                ON playlist_songs(playlist_id, position)
+            """)
+
             conn.commit()
             log.info("Database schema initialized successfully")
 
@@ -199,15 +216,32 @@ class Database:
 
             # Migration: Add mode column to schedule table if it doesn't exist
             cursor.execute("PRAGMA table_info(schedule)")
-            columns = [col[1] for col in cursor.fetchall()]
+            schedule_cols = [col[1] for col in cursor.fetchall()]
 
-            if 'mode' not in columns:
+            if 'mode' not in schedule_cols:
                 log.info("Migrating schedule table: adding mode column")
                 cursor.execute("""
                     ALTER TABLE schedule ADD COLUMN mode TEXT DEFAULT 'playlist'
                 """)
                 conn.commit()
-                log.info("Migration completed: mode column added to schedule table")
+
+            # Migration: Add sequence columns to songs table if they don't exist
+            cursor.execute("PRAGMA table_info(songs)")
+            song_cols = [col[1] for col in cursor.fetchall()]
+
+            if 'sequence_mode' not in song_cols:
+                log.info("Migrating songs table: adding sequence_mode column")
+                cursor.execute("ALTER TABLE songs ADD COLUMN sequence_mode TEXT DEFAULT 'fft'")
+
+            if 'sequence_timing' not in song_cols:
+                log.info("Migrating songs table: adding sequence_timing column")
+                cursor.execute("ALTER TABLE songs ADD COLUMN sequence_timing INTEGER DEFAULT 50")
+
+            if 'has_custom_sequence' not in song_cols:
+                log.info("Migrating songs table: adding has_custom_sequence column")
+                cursor.execute("ALTER TABLE songs ADD COLUMN has_custom_sequence BOOLEAN DEFAULT 0")
+
+            conn.commit()
 
     def insert_default_data(self):
         """Insert default data if tables are empty."""
@@ -227,12 +261,13 @@ class Database:
             cursor.execute("SELECT COUNT(*) FROM playlists")
             if cursor.fetchone()[0] == 0:
                 home = os.getenv("SYNCHRONIZED_LIGHTS_HOME")
-                default_playlist = os.path.join(home, "music", ".playlist")
+                sample_playlist = os.path.join(home, "music", "sample", ".playlist")
+                default_playlist = sample_playlist if os.path.exists(sample_playlist) else os.path.join(home, "music", ".playlist")
                 cursor.execute("""
                     INSERT INTO playlists (name, file_path, is_active)
                     VALUES ('Default', ?, 1)
                 """, (default_playlist,))
-                log.info("Inserted default playlist")
+                log.info(f"Inserted default playlist ({default_playlist})")
 
             conn.commit()
 
@@ -255,7 +290,6 @@ def init_database(db_path: Optional[str] = None) -> Database:
 
 
 if __name__ == "__main__":
-    # Allow running this module directly to initialize the database
     logging.basicConfig(level=logging.INFO)
     init_database()
     print("Database initialized successfully")

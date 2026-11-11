@@ -1,6 +1,14 @@
 import { useState, useEffect } from 'react';
-import { lightshow, schedules as schedulesApi, buttons } from '../services/api';
+import {
+  lightshow,
+  schedules as schedulesApi,
+  buttons,
+  playlists as playlistsApi,
+  songs as songsApi
+} from '../services/api';
 import ScheduleManager from './ScheduleManager';
+import PlaylistSongManager from './PlaylistSongManager';
+import SequenceEditor from './SequenceEditor';
 import '../styles/Dashboard.css';
 
 export default function Dashboard({ onLogout }) {
@@ -8,27 +16,40 @@ export default function Dashboard({ onLogout }) {
   const [upcomingEvents, setUpcomingEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [showSchedules, setShowSchedules] = useState(false);
+  const [activeView, setActiveView] = useState('dashboard'); // 'dashboard' | 'songs' | 'playlists' | 'sequence' | 'schedules'
+  const [editorSong, setEditorSong] = useState(null);
   const [buttonStatus, setButtonStatus] = useState(null);
   const [buttonHealth, setButtonHealth] = useState(null);
   const [selectedMode, setSelectedMode] = useState('playlist');
+  const [playlistsList, setPlaylistsList] = useState([]);
+  const [selectedPlaylistId, setSelectedPlaylistId] = useState('');
+  const [songsSummary, setSongsSummary] = useState([]);
 
-  // Auto-refresh status every 2 seconds
+  // Poll status efficiently (pauses when tab is hidden or when in another view)
   useEffect(() => {
+    if (activeView !== 'dashboard') return;
+
     fetchStatus();
     fetchUpcomingEvents();
     fetchButtonStatus();
     fetchButtonHealth();
+    fetchMediaSummary();
 
+    let tickCount = 0;
     const interval = setInterval(() => {
+      if (document.hidden) return;
+      tickCount += 1;
       fetchStatus();
-      fetchUpcomingEvents();
       fetchButtonStatus();
-      fetchButtonHealth();
-    }, 2000);
+      // Poll less frequently for static/slow-changing data to save Pi Zero 2 W CPU
+      if (tickCount % 5 === 0) {
+        fetchUpcomingEvents();
+        fetchButtonHealth();
+      }
+    }, 3000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [activeView]);
 
   const fetchStatus = async () => {
     try {
@@ -39,6 +60,23 @@ export default function Dashboard({ onLogout }) {
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchMediaSummary = async () => {
+    try {
+      const [pls, sgs] = await Promise.all([
+        playlistsApi.list(),
+        songsApi.list(false)
+      ]);
+      setPlaylistsList(pls);
+      setSongsSummary(sgs);
+      const activePl = pls.find((p) => p.is_active || p.active) || pls[0];
+      if (activePl && !selectedPlaylistId) {
+        setSelectedPlaylistId(String(activePl.id));
+      }
+    } catch (err) {
+      console.error('Failed to fetch media summary:', err);
     }
   };
 
@@ -71,8 +109,13 @@ export default function Dashboard({ onLogout }) {
 
   const handleStart = async () => {
     try {
-      await lightshow.start(true, selectedMode);
+      const plId =
+        selectedMode === 'playlist' && selectedPlaylistId
+          ? parseInt(selectedPlaylistId, 10)
+          : null;
+      await lightshow.start(true, selectedMode, plId, null);
       await fetchStatus();
+      await fetchMediaSummary();
     } catch (err) {
       setError(err.message);
     }
@@ -125,23 +168,92 @@ export default function Dashboard({ onLogout }) {
     }
   };
 
+  const handleOpenSequenceEditor = (song = null) => {
+    setEditorSong(song || songsSummary[0] || null);
+    setActiveView('sequence');
+  };
+
   if (loading) {
     return <div className="dashboard-loading">Loading...</div>;
   }
 
-  if (showSchedules) {
+  if (activeView === 'schedules') {
     return (
       <ScheduleManager
-        onBack={() => setShowSchedules(false)}
+        onBack={() => setActiveView('dashboard')}
         onLogout={onLogout}
       />
     );
   }
 
+  if (activeView === 'songs' || activeView === 'playlists') {
+    return (
+      <PlaylistSongManager
+        initialTab={activeView === 'playlists' ? 'playlists' : 'songs'}
+        onBack={() => setActiveView('dashboard')}
+        onLogout={onLogout}
+        onOpenSequenceEditor={(song) => handleOpenSequenceEditor(song)}
+      />
+    );
+  }
+
+  if (activeView === 'sequence') {
+    return (
+      <SequenceEditor
+        initialSong={editorSong}
+        onBack={() => setActiveView('songs')}
+        onLogout={onLogout}
+        onSongUpdated={() => fetchMediaSummary()}
+      />
+    );
+  }
+
+  const customSongsCount = songsSummary.filter((s) => s.sequence_mode === 'custom').length;
+  const activePlaylistObj = playlistsList.find((p) => p.is_active || p.active);
+
   return (
     <div className="dashboard">
       <header className="dashboard-header">
-        <h1>🎄 LightShowPi Neo</h1>
+        <div className="header-nav-left">
+          <h1>🎄 LightShowPi Neo</h1>
+          <nav className="main-nav">
+            <button
+              type="button"
+              className="nav-pill active"
+              onClick={() => setActiveView('dashboard')}
+            >
+              🎛️ Dashboard
+            </button>
+            <button
+              type="button"
+              className="nav-pill"
+              onClick={() => setActiveView('songs')}
+            >
+              🎵 Songs &amp; Upload
+            </button>
+            <button
+              type="button"
+              className="nav-pill"
+              onClick={() => setActiveView('playlists')}
+            >
+              📋 Playlists
+            </button>
+            <button
+              type="button"
+              className="nav-pill"
+              onClick={() => handleOpenSequenceEditor(null)}
+            >
+              ✨ Sequence Studio
+            </button>
+            <button
+              type="button"
+              className="nav-pill"
+              onClick={() => setActiveView('schedules')}
+            >
+              📅 Schedules
+            </button>
+          </nav>
+        </div>
         <button onClick={onLogout} className="btn btn-secondary">
           Logout
         </button>
@@ -183,6 +295,15 @@ export default function Dashboard({ onLogout }) {
             )}
 
             <div className="status-item">
+              <span className="label">Active Playlist:</span>
+              <span className="value">
+                {activePlaylistObj
+                  ? `${activePlaylistObj.name} (${activePlaylistObj.song_count} songs)`
+                  : 'Default'}
+              </span>
+            </div>
+
+            <div className="status-item">
               <span className="label">Schedule:</span>
               <span className="value">
                 {status?.schedule_enabled ? '✓ Enabled' : '✗ Disabled'}
@@ -209,6 +330,26 @@ export default function Dashboard({ onLogout }) {
               <option value="stream-in">Stream In</option>
             </select>
           </div>
+
+          {selectedMode === 'playlist' && playlistsList.length > 0 && (
+            <div className="mode-selector">
+              <label htmlFor="playlist-select">Playlist:</label>
+              <select
+                id="playlist-select"
+                value={selectedPlaylistId}
+                onChange={(e) => setSelectedPlaylistId(e.target.value)}
+                disabled={status?.state === 'playing'}
+                className="mode-select"
+              >
+                {playlistsList.map((pl) => (
+                  <option key={pl.id} value={pl.id}>
+                    {pl.name} ({pl.song_count} songs){pl.is_active || pl.active ? ' ★' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <div className="controls-grid">
             <button
               onClick={handleStart}
@@ -235,10 +376,54 @@ export default function Dashboard({ onLogout }) {
             </button>
 
             <button
-              onClick={() => setShowSchedules(true)}
+              onClick={() => setActiveView('schedules')}
               className="btn btn-secondary btn-large"
             >
               📅 Schedules
+            </button>
+          </div>
+        </div>
+
+        {/* Music, Playlists & Custom Light Sequence Quick Card */}
+        <div className="card media-overview-card">
+          <h2>🎵 Music &amp; Light Sequences</h2>
+          <div className="status-grid">
+            <div className="status-item">
+              <span className="label">Library Songs:</span>
+              <span className="value">{songsSummary.length} tracks</span>
+            </div>
+            <div className="status-item">
+              <span className="label">Light Control Modes:</span>
+              <span className="value">
+                🎵 {songsSummary.length - customSongsCount} FFT • ✨ {customSongsCount} Custom
+              </span>
+            </div>
+            <div className="status-item">
+              <span className="label">Playlists:</span>
+              <span className="value">{playlistsList.length} configured</span>
+            </div>
+          </div>
+          <div className="controls-grid mt-md">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => setActiveView('songs')}
+            >
+              ⬆️ Upload &amp; Songs
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setActiveView('playlists')}
+            >
+              📋 Manage Playlists
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary span-2"
+              onClick={() => handleOpenSequenceEditor(null)}
+            >
+              ✨ Open Custom Sequence Studio
             </button>
           </div>
         </div>

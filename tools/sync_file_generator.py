@@ -73,37 +73,28 @@ hc = hardware_controller.Hardware()
 # get copy of configuration manager
 cm = hc.cm
 
-#### reusing code from synchronized_lights.py
-#### no need to reinvent the wheel
-
-GPIOLEN = cm.hardware.gpio_len 
+GPIOLEN = cm.hardware.gpio_len
 _MIN_FREQUENCY = cm.audio_processing.min_frequency
 _MAX_FREQUENCY = cm.audio_processing.max_frequency
 
 try:
     _CUSTOM_CHANNEL_MAPPING = cm.audio_processing.custom_channel_mapping
-except:
+except Exception:
     _CUSTOM_CHANNEL_MAPPING = 0
 
 try:
     _CUSTOM_CHANNEL_FREQUENCIES = cm.audio_processing.custom_channel_frequencies
-except:
+except Exception:
     _CUSTOM_CHANNEL_FREQUENCIES = 0
 
-CHUNK_SIZE = 2048  # Use a multiple of 8 (move this to config)
+CHUNK_SIZE = cm.audio_processing.chunk_size
+
 
 def calculate_channel_frequency(min_frequency,
                                 max_frequency,
                                 custom_channel_mapping,
                                 custom_channel_frequencies):
-    """
-    Calculate frequency values
-
-    Calculate frequency values for each channel,
-    taking into account custom settings.
-    """
-
-    # How many channels do we need to calculate the frequency for
+    """Calculate frequency values for each channel, taking into account custom settings."""
     if custom_channel_mapping != 0 and len(custom_channel_mapping) == GPIOLEN:
         channel_length = max(custom_channel_mapping)
     else:
@@ -111,40 +102,33 @@ def calculate_channel_frequency(min_frequency,
 
     octaves = (np.log(max_frequency / min_frequency)) / np.log(2)
     octaves_per_channel = octaves / channel_length
-    frequency_limits = []
+    frequency_limits = [min_frequency]
     frequency_store = []
 
-    frequency_limits.append(min_frequency)
     if custom_channel_frequencies != 0 and (len(custom_channel_frequencies)
                                             >= channel_length + 1):
         frequency_limits = custom_channel_frequencies
     else:
-        for i in range(1, GPIOLEN + 1):
+        for _ in range(1, GPIOLEN + 1):
             frequency_limits.append(frequency_limits[-1]
                                     * 10 ** (3 /
                                              (10 * (1 / octaves_per_channel))))
     for i in range(0, channel_length):
         frequency_store.append((frequency_limits[i], frequency_limits[i + 1]))
 
-    # we have the frequencies now lets map them if custom mapping is defined
     if custom_channel_mapping != 0 and len(custom_channel_mapping) == GPIOLEN:
         frequency_map = []
         for i in range(0, GPIOLEN):
             mapped_channel = custom_channel_mapping[i] - 1
             mapped_frequency_set = frequency_store[mapped_channel]
-            mapped_frequency_set_low = mapped_frequency_set[0]
-            mapped_frequency_set_high = mapped_frequency_set[1]
             frequency_map.append(mapped_frequency_set)
         return frequency_map
     else:
         return frequency_store
 
-def cache_song(song_filename):
-    """Play the next song from the play list (or --file argument)."""
-    # Initialize FFT stats
-    matrix = [0 for _ in range(GPIOLEN)] # get length of gpio and assign it to a variable
 
-    # Set up audio
+def cache_song(song_filename):
+    """Generate FFT sync file for song_filename."""
     if song_filename.endswith('.wav'):
         musicfile = wave.open(song_filename, 'r')
     else:
@@ -159,58 +143,50 @@ def cache_song(song_filename):
                        _MIN_FREQUENCY,
                        _MAX_FREQUENCY,
                        _CUSTOM_CHANNEL_MAPPING,
-                       _CUSTOM_CHANNEL_FREQUENCIES)
+                       _CUSTOM_CHANNEL_FREQUENCIES,
+                       num_channels,
+                       False)
 
     song_filename = os.path.abspath(song_filename)
-
-    # create empty array for the cache_matrix
-    cache_matrix = np.empty(shape=[0, GPIOLEN])
     cache_filename = \
         os.path.dirname(song_filename) + "/." + os.path.basename(song_filename) + ".sync"
 
-    # The values 12 and 1.5 are good estimates for first time playing back 
-    # (i.e. before we have the actual mean and standard deviations 
-    # calculated for each channel).
     mean = [12.0 for _ in range(GPIOLEN)]
     std = [1.5 for _ in range(GPIOLEN)]
 
-    # Process audio song_filename
-    row = 0
-    data = musicfile.readframes(CHUNK_SIZE) # move chunk_size to configuration_manager
+    # Process audio song_filename using O(N) list accumulation
+    cache_rows = []
+    data = musicfile.readframes(CHUNK_SIZE)
 
     while data != b'':
-        # No cache - Compute FFT in this chunk, and cache results
         matrix = fft_calc.calculate_levels(data)
-
-        # Add the matrix to the end of the cache 
-        cache_matrix = np.vstack([cache_matrix, matrix])
-
-        # Read next chunk of data from music song_filename
+        cache_rows.append(matrix)
         data = musicfile.readframes(CHUNK_SIZE)
-        row = row + 1
 
-    # Compute the standard deviation and mean values for the cache
-    for i in range(0, GPIOLEN):
-        std[i] = np.std([item for item in cache_matrix[:, i] if item > 0])
-        mean[i] = np.mean([item for item in cache_matrix[:, i] if item > 0])
+    cache_matrix = np.asarray(cache_rows, dtype=np.float32) if cache_rows else np.empty((0, GPIOLEN), dtype=np.float32)
 
-    # Add mean and std to the top of the cache
-    cache_matrix = np.vstack([mean, cache_matrix])
-    cache_matrix = np.vstack([std, cache_matrix])
+    if len(cache_matrix) > 0:
+        for i in range(0, GPIOLEN):
+            col = cache_matrix[:, i]
+            pos = col[col > 0]
+            if len(pos) > 0:
+                std[i] = float(np.std(pos))
+                mean[i] = float(np.mean(pos))
 
-    # Save the cache using numpy savetxt
-    np.savetxt(cache_filename, cache_matrix)
+    full_cache = np.vstack([std, mean, cache_matrix]) if len(cache_matrix) > 0 else np.vstack([std, mean])
+    np.savetxt(cache_filename, full_cache, fmt='%.6g')
+    fft_calc.compare_config(cache_filename)
+    fft_calc.save_config()
 
-#### end reuse 
 
-def main():        
-    print ("Do you want to generate sync files?")
-    print 
-    print ("This could take a while if you have a lot of songs")
+def main():
+    print("Do you want to generate sync files?")
+    print()
+    print("This could take a while if you have a lot of songs")
 
     question = input("Would you like to proceed? (Y to continue) :")
 
-    if not question in ["y", "Y"]:
+    if question not in ["y", "Y"]:
         sys.exit(0)
 
     location = input("Enter the path to the folder of songs:")
@@ -229,12 +205,12 @@ def main():
     playlistFile = open(location + "playlist", "w")
 
     for song in sync_list:
-        print ("Generating sync file for",song)
+        print("Generating sync file for", song)
         cache_song(song)
-        print ("cached")
+        print("cached")
 
         metadata = mutagen.File(song, easy=True)
-        if "title" in metadata:
+        if metadata and "title" in metadata:
             title = metadata["title"][0]
         else:
             title = os.path.splitext(os.path.basename(song))[0].strip()
@@ -244,10 +220,11 @@ def main():
 
     playlistFile.close()
 
-    print ("All Finished.")
-    print ("A playlist was also generated")
-    print (location + "playlist")
+    print("All Finished.")
+    print("A playlist was also generated")
+    print(location + "playlist")
     sys.path[:] = path
+
 
 if __name__ == "__main__":
     main()

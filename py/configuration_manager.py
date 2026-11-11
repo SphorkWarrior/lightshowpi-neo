@@ -17,7 +17,10 @@ import configparser
 import ast
 import csv
 import datetime
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import logging
 import os
 import os.path
@@ -27,6 +30,8 @@ import json
 import shlex
 import argparse
 from collections import defaultdict
+
+log = logging.getLogger(__name__)
 
 # The home directory and configuration directory for the application.
 HOME_DIR = os.getenv("SYNCHRONIZED_LIGHTS_HOME")
@@ -38,6 +43,12 @@ if not HOME_DIR:
 
 CONFIG_DIR = HOME_DIR + '/config'
 LOG_DIR = HOME_DIR + '/logs'
+
+
+def _lock_file(fp, mode):
+    """Acquire file lock when fcntl is available (Linux/Pi)."""
+    if fcntl is not None:
+        fcntl.lockf(fp, mode)
 
 
 def _as_list(list_str, delimiter=','):
@@ -72,6 +83,7 @@ class Configuration(object):
         self.config_dir = self.home_dir + "/config/"
         self.log_dir = self.home_dir + "/logs/"
         self.state_file = self.config_dir + "state.cfg"
+        self._state_mtime = None
 
         self.param_config = param_config
 
@@ -85,9 +97,10 @@ class Configuration(object):
 
         # Ensure state file has been created
         if not os.path.isfile(self.state_file):
-            open(self.state_file, 'w').close()
+            with open(self.state_file, 'w'):
+                pass
 
-        self.load_state()
+        self.load_state(force=True)
 
         # Initialize all configuration sections
         self.hardware = None
@@ -108,7 +121,8 @@ class Configuration(object):
 
     def load_config(self):
         """Load config files into ConfigParser instance"""
-        self.config.read_file(open(self.config_dir + 'defaults.cfg'))
+        with open(self.config_dir + 'defaults.cfg') as f:
+            self.config.read_file(f)
 
         overrides = list()
         if self.param_config:
@@ -122,12 +136,24 @@ class Configuration(object):
         self.config.read(overrides)
 
     # handle the program state / next 3 methods
-    def load_state(self):
-        """Force the state to be reloaded form disk."""
+    def load_state(self, force=False):
+        """Reload state from disk only when modified (or when force=True)."""
+        try:
+            mtime = os.stat(self.state_file).st_mtime_ns
+            if not force and self._state_mtime is not None and mtime == self._state_mtime:
+                return
+        except OSError:
+            mtime = None
+
         with open(self.state_file) as state_fp:
-            fcntl.lockf(state_fp, fcntl.LOCK_SH)
+            if fcntl is not None:
+                _lock_file(state_fp, fcntl.LOCK_SH)
+            self.state.clear()
             self.state.read_file(state_fp, self.state_file)
-            fcntl.lockf(state_fp, fcntl.LOCK_UN)
+            if fcntl is not None:
+                _lock_file(state_fp, fcntl.LOCK_UN)
+
+        self._state_mtime = mtime
 
     def get_state(self, name, default=""):
         """
@@ -168,9 +194,16 @@ class Configuration(object):
         self.state.set(self.state_section, name, value)
 
         with open(self.state_file, 'wt') as state_fp:
-            fcntl.lockf(state_fp, fcntl.LOCK_EX)
+            if fcntl is not None:
+                _lock_file(state_fp, fcntl.LOCK_EX)
             self.state.write(state_fp)
-            fcntl.lockf(state_fp, fcntl.LOCK_UN)
+            if fcntl is not None:
+                _lock_file(state_fp, fcntl.LOCK_UN)
+
+        try:
+            self._state_mtime = os.stat(self.state_file).st_mtime_ns
+        except OSError:
+            self._state_mtime = None
 
     def set_configs(self):
 
@@ -252,7 +285,8 @@ class Configuration(object):
         """
 
         self.led_config = configparser.RawConfigParser(allow_no_value=True)
-        self.led_config.read_file(open(self.config_dir + config_file))
+        with open(self.config_dir + config_file) as f:
+            self.led_config.read_file(f)
 
         led = dict()
 
@@ -281,7 +315,6 @@ class Configuration(object):
         led["enable_multicast"] = self.led_config.getboolean('led', 'enable_multicast')
 
         # if multicast is enabled setup broadcast flag and broadcast address
-        # TODO: possibly need to manage broadcast address a little differently in future to handle more customization
         if led["enable_multicast"]:
             led["sacn_address"] = "239.255.0.1"
             led["sacn_broadcast"] = True
@@ -306,7 +339,7 @@ class Configuration(object):
             led["custom_per_channel"] = list(map(int, g_leds.split(",")))
             led["led_channel_count"] = len(led["custom_per_channel"])
             led_count = len(led["custom_per_channel"])
-        except (AttributeError, ValueError, TypeError ):
+        except (AttributeError, ValueError, TypeError):
             led["custom_per_channel"] = list()
             led["led_channel_count"] = led_count
 
@@ -411,13 +444,6 @@ class Configuration(object):
             channels = [_ for _ in range(self.gpio_len)]
         else:
             channels = list(map(int, self.config.get('network', 'channels').split(",")))
-
-        # Removing this because it doesn't handle multiple network channels mapped to same server channel
-        # Basically it ends up overwriting the key in the dict
-        # We're going to keep this as is and handle later
-        #temp = defaultdict()
-        #for channel in range(len(channels)):
-        #    temp[channels[channel]] = channel
 
         ntwrk["channels"] = channels
 
@@ -554,28 +580,28 @@ class Configuration(object):
 
         try:
             with open(play_list, 'rt') as playlist_fp:
-                fcntl.lockf(playlist_fp, fcntl.LOCK_SH)
+                if fcntl is not None:
+                    _lock_file(playlist_fp, fcntl.LOCK_SH)
                 playlist = csv.reader(playlist_fp, delimiter='\t')
                 songs = list()
 
                 for song in playlist:
+                    if not song or (len(song) == 1 and not song[0].strip()):
+                        continue
                     if len(song) < 2 or len(song) > 4:
-                        log.error('Invalid playlist.  Each line should be in the form: '
+                        log.error('Invalid playlist. Each line should be in the form: '
                                   '<song name><tab><path to song>')
                         log.warning('Removing invalid entry')
-                        print("Error found in playlist")
-                        print("Deleting entry:", song)
                         continue
-
                     elif len(song) > 2:
-                        song[2] = set(song[2].split(','))
-
+                        song[2] = set(song[2].split(',')) if song[2] else set()
                     elif len(song) == 2:
                         song.append(set())
 
                     songs.append(song)
 
-                fcntl.lockf(playlist_fp, fcntl.LOCK_UN)
+                if fcntl is not None:
+                    _lock_file(playlist_fp, fcntl.LOCK_UN)
         except Exception as e:
             log.error(f"Error reading playlist file: {e}")
             print(f"\nERROR: Failed to read playlist file: {play_list}")
@@ -593,21 +619,25 @@ class Configuration(object):
         playlist = playlist or self.playlist_path
 
         with open(playlist, 'wt') as playlist_fp:
-            fcntl.lockf(playlist_fp, fcntl.LOCK_EX)
+            if fcntl is not None:
+                _lock_file(playlist_fp, fcntl.LOCK_EX)
             writer = csv.writer(playlist_fp, delimiter='\t')
 
+            rows_to_write = []
             for song in songs:
-                if len(song[2]) > 0:
-                    song[2] = ",".join(song[2])
-                else:
-                    del song[2]
+                row = list(song)
+                if len(row) > 2:
+                    if len(row[2]) > 0:
+                        row[2] = ",".join(row[2]) if isinstance(row[2], (set, list)) else str(row[2])
+                    else:
+                        del row[2]
+                rows_to_write.append(row)
 
-            writer.writerows(songs)
-            fcntl.lockf(playlist_fp, fcntl.LOCK_UN)
+            writer.writerows(rows_to_write)
+            if fcntl is not None:
+                _lock_file(playlist_fp, fcntl.LOCK_UN)
 
         self.playlist = songs
-
-    # SMS-related methods (has_permission, is_throttle_exceeded) removed
 
 
 class Section(object):

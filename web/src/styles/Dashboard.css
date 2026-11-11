@@ -11,6 +11,8 @@
   justify-content: space-between;
   align-items: center;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  gap: var(--spacing-md);
+  flex-wrap: wrap;
 }
 
 .dashboard-header h1 {
@@ -18,9 +20,48 @@
   color: var(--primary-color);
 }
 
+.header-nav-left {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xl);
+  flex-wrap: wrap;
+}
+
+.main-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.nav-pill {
+  padding: 8px 14px;
+  border-radius: var(--border-radius);
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-dark);
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.nav-pill:hover {
+  color: var(--text-primary);
+  border-color: var(--primary-color);
+}
+
+.nav-pill.active {
+  background-color: var(--primary-color);
+  color: white;
+  border-color: var(--primary-color);
+}
+
 .header-actions {
   display: flex;
   gap: var(--spacing-md);
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 /* Error Banner */
@@ -153,7 +194,7 @@
   display: flex;
   align-items: center;
   gap: var(--spacing-md);
-  margin-bottom: var(--spacing-lg);
+  margin-bottom: var(--spacing-md);
   padding: var(--spacing-md);
   background-color: var(--bg-dark);
   border-radius: var(--border-radius);
@@ -196,6 +237,14 @@
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: var(--spacing-md);
+}
+
+.mt-md {
+  margin-top: var(--spacing-md);
+}
+
+.span-2 {
+  grid-column: span 2;
 }
 
 /* Button Controls Card */
@@ -284,5 +333,9 @@
 
   .controls-grid {
     grid-template-columns: 1fr;
+  }
+
+  .span-2 {
+    grid-column: span 1;
   }
 }

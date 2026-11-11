@@ -20,9 +20,9 @@ numpy: for array support - http://www.numpy.org/
 
 import configparser
 import logging
-import os.path
-from numpy import *
 import math
+import os.path
+import numpy as np
 
 
 class FFT(object):
@@ -64,11 +64,11 @@ class FFT(object):
 
         """
 
-        self.chunk_size = chunk_size
-        self.sample_rate = sample_rate
-        self.num_bins = num_bins
-        self.input_channels = input_channels
-        self.window = hanning(0)
+        self.chunk_size = int(chunk_size)
+        self.sample_rate = int(sample_rate)
+        self.num_bins = int(num_bins)
+        self.input_channels = int(input_channels)
+        self.window = np.hanning(self.chunk_size).astype(np.float32) if self.chunk_size > 0 else np.empty(0, dtype=np.float32)
         self.min_frequency = min_frequency
         self.max_frequency = max_frequency
         self.custom_channel_mapping = custom_channel_mapping
@@ -85,60 +85,72 @@ class FFT(object):
                           "Set use_gpu=False in config to suppress this warning.")
         self.use_gpu = False  # Always use CPU
 
-        fl = array(self.frequency_limits)
-        self.piff = ((fl * self.chunk_size) / self.sample_rate).astype(int)
+        fl = np.asarray(self.frequency_limits, dtype=np.float64)
+        piff_arr = ((fl * self.chunk_size) / self.sample_rate).astype(int)
 
-        for a in range(len(self.piff)):
-            if self.piff[a][0] == self.piff[a][1]:
-                self.piff[a][1] += 1
-        self.piff = self.piff.tolist()
+        for a in range(len(piff_arr)):
+            if piff_arr[a][0] == piff_arr[a][1]:
+                piff_arr[a][1] += 1
+        self.piff = [(int(row[0]), int(row[1])) for row in piff_arr]
 
     def calculate_piff(self, val, chunk_size, sample_rate):
-        return int(chunk_size * val / sample_rate) 
-        
+        return int(chunk_size * val / sample_rate)
+
     def calculate_levels(self, data):
         """Calculate frequency response for each channel defined in frequency_limits
 
         :param data: decoder.frames(), audio data for fft calculations
-        :type data: decoder.frames
+        :type data: bytes | bytearray | memoryview | numpy.ndarray
 
-        :return:
-        :rtype: numpy.array
+        :return: frequency response levels per channel
+        :rtype: numpy.ndarray
         """
-        # create a numpy array, taking just the left channel if stereo
-        data_stereo = frombuffer(data, dtype="int16")
+        # Create a numpy view without copying where possible
+        if isinstance(data, np.ndarray):
+            data_stereo = data.astype(np.int16, copy=False).ravel()
+        else:
+            data_stereo = np.frombuffer(data, dtype=np.int16)
 
         if self.input_channels == 2:
-            # data has 2 bytes per channel
-            # pull out the even values, just using left channel
-            data = array(data_stereo[::2])
-        elif self.input_channels == 1:
-            data = data_stereo
+            # Pull out the even values (left channel) as a zero-copy strided view
+            samples = data_stereo[::2]
+        else:
+            samples = data_stereo
 
-        # if you take an FFT of a chunk of audio, the edges will look like
-        # super high frequency cutoffs. Applying a window tapers the edges
-        # of each end of the chunk down to zero.
-        if len(data) != len(self.window):
-            self.window = hanning(len(data)).astype(float32)
+        n_samples = len(samples)
+        if n_samples == 0 or not np.any(samples):
+            return np.zeros(self.num_bins, dtype=np.float32)
 
-        data = data * self.window
+        # Reuse precomputed Hanning window unless chunk length differs
+        if n_samples != len(self.window):
+            self.window = np.hanning(n_samples).astype(np.float32)
 
-        # if all zeros in data then there is no need to do the fft 
-        if all(data == 0.0):
-            return zeros(self.num_bins, dtype="float32")
+        windowed = samples * self.window
 
-        # Apply FFT - real data using numpy (CPU-based)
-        # Calculate the power spectrum
-        matrix = fft.rfft(data)
-        matrix = delete(matrix, len(matrix) - 1)
+        # Apply real FFT and drop Nyquist bin using a zero-copy slice instead of np.delete
+        spectrum = np.fft.rfft(windowed)[:-1]
+        if len(spectrum) == 0:
+            return np.zeros(self.num_bins, dtype=np.float32)
 
-        power = abs(matrix) ** 2
+        # Compute power spectrum directly without square-root overhead of abs()
+        power = spectrum.real ** 2 + spectrum.imag ** 2
 
-        cache_matrix = zeros(self.num_bins)
-        for i in range(self.num_bins):
-            psum = sum(power[self.calculate_piff(self.frequency_limits[i][0], self.chunk_size, self.sample_rate):self.calculate_piff(self.frequency_limits[i][1], self.chunk_size, self.sample_rate):1])
-            if (psum):
-                cache_matrix[i] = log10(psum)
+        cache_matrix = np.zeros(self.num_bins, dtype=np.float32)
+        if n_samples == self.chunk_size:
+            for i, (start, end) in enumerate(self.piff):
+                psum = float(power[start:end].sum())
+                if psum > 0.0:
+                    cache_matrix[i] = math.log10(psum)
+        else:
+            scale = n_samples / self.sample_rate
+            for i, (f_low, f_high) in enumerate(self.frequency_limits):
+                start = int(f_low * scale)
+                end = int(f_high * scale)
+                if start == end:
+                    end += 1
+                psum = float(power[start:end].sum())
+                if psum > 0.0:
+                    cache_matrix[i] = math.log10(psum)
 
         return cache_matrix
 
@@ -162,7 +174,7 @@ class FFT(object):
             channel_length = self.num_bins
 
         logging.debug("Calculating frequencies for %d channels.", channel_length)
-        octaves = (log(self.max_frequency / self.min_frequency)) / log(2)
+        octaves = (math.log(self.max_frequency / self.min_frequency)) / math.log(2)
         logging.debug("octaves in selected frequency range ... %s", octaves)
         octaves_per_channel = octaves / channel_length
         frequency_limits = []
@@ -176,9 +188,10 @@ class FFT(object):
             frequency_limits = self.custom_channel_frequencies
         else:
             logging.debug("Custom channel frequencies are not being used")
-            for pin in range(1, self.num_bins + 1):
-                frequency_limits.append(frequency_limits[-1]
-                                        * 10 ** (3 / (10 * (1 / octaves_per_channel))))
+            multiplier = 10 ** (3 / (10 * (1 / octaves_per_channel)))
+            for _ in range(1, self.num_bins + 1):
+                frequency_limits.append(frequency_limits[-1] * multiplier)
+
         for pin in range(0, channel_length):
             frequency_store.append((frequency_limits[pin], frequency_limits[pin + 1]))
             logging.debug("channel %d is %6.2f to %6.2f ", pin, frequency_limits[pin],
@@ -191,11 +204,8 @@ class FFT(object):
             for pin in range(0, self.num_bins):
                 mapped_channel = self.custom_channel_mapping[pin] - 1
                 mapped_frequency_set = frequency_store[mapped_channel]
-                mapped_frequency_set_low = mapped_frequency_set[0]
-                mapped_frequency_set_high = mapped_frequency_set[1]
-                logging.debug("mapped channel: " + str(mapped_channel) + " will hold LOW: "
-                              + str(mapped_frequency_set_low) + " HIGH: "
-                              + str(mapped_frequency_set_high))
+                logging.debug("mapped channel: %s will hold LOW: %s HIGH: %s",
+                              mapped_channel, mapped_frequency_set[0], mapped_frequency_set[1])
                 frequency_map.append(mapped_frequency_set)
 
             return frequency_map
@@ -214,7 +224,7 @@ class FFT(object):
         self.config_filename = cache_filename.replace(".sync", ".cfg")
 
         if not os.path.isfile(self.config_filename):
-            logging.warn("No cached config data found")
+            logging.warning("No cached config data found")
             return False
         else:
             has_config = True
@@ -260,7 +270,7 @@ class FFT(object):
 
         if fft_cache != fft_current:
             has_config = False
-            logging.warn("Cached config data does not match")
+            logging.warning("Cached config data does not match")
 
         return has_config
 

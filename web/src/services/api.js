@@ -41,9 +41,10 @@ function clearAuthToken() {
  */
 async function apiRequest(endpoint, options = {}) {
   const token = getAuthToken();
+  const isFormData = options.body instanceof FormData;
 
   const headers = {
-    'Content-Type': 'application/json',
+    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
     ...options.headers
   };
 
@@ -59,7 +60,6 @@ async function apiRequest(endpoint, options = {}) {
   try {
     const response = await fetch(`${API_BASE}${endpoint}`, config);
 
-    // Handle non-2xx responses
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
       throw new ApiError(
@@ -69,7 +69,6 @@ async function apiRequest(endpoint, options = {}) {
       );
     }
 
-    // Handle 204 No Content
     if (response.status === 204) {
       return null;
     }
@@ -120,14 +119,28 @@ export const lightshow = {
     return apiRequest('/lightshow/status');
   },
 
-  async start(resumeSchedule = true, mode = null, playlist = null) {
+  async start(resumeScheduleOrOptions = true, mode = null, playlistId = null, songId = null) {
+    let payload;
+    if (typeof resumeScheduleOrOptions === 'object' && resumeScheduleOrOptions !== null) {
+      payload = {
+        resume_schedule: resumeScheduleOrOptions.resumeSchedule ?? true,
+        mode: resumeScheduleOrOptions.mode ?? null,
+        playlist: resumeScheduleOrOptions.playlist ?? null,
+        playlist_id: resumeScheduleOrOptions.playlistId ?? null,
+        song_id: resumeScheduleOrOptions.songId ?? null
+      };
+    } else {
+      payload = {
+        resume_schedule: resumeScheduleOrOptions,
+        mode,
+        playlist_id: playlistId,
+        song_id: songId
+      };
+    }
+
     return apiRequest('/lightshow/start', {
       method: 'POST',
-      body: JSON.stringify({
-        resume_schedule: resumeSchedule,
-        mode: mode,
-        playlist: playlist
-      })
+      body: JSON.stringify(payload)
     });
   },
 
@@ -141,6 +154,171 @@ export const lightshow = {
   async skip() {
     return apiRequest('/lightshow/skip', {
       method: 'POST'
+    });
+  }
+};
+
+// =============================================================================
+// Songs & Custom Light Sequences API
+// =============================================================================
+
+export const songs = {
+  async list(refresh = false) {
+    const query = refresh ? '?refresh=true' : '';
+    return apiRequest(`/songs${query}`);
+  },
+
+  async get(songId) {
+    return apiRequest(`/songs/${songId}`);
+  },
+
+  async upload(file, titleOrOpts = null, artist = null, playlistId = null) {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    let finalTitle = titleOrOpts;
+    let finalArtist = artist;
+    let finalPlaylistId = playlistId;
+
+    if (typeof titleOrOpts === 'object' && titleOrOpts !== null) {
+      finalTitle = titleOrOpts.title || null;
+      finalArtist = titleOrOpts.artist || null;
+      finalPlaylistId = titleOrOpts.playlistId ?? null;
+    }
+
+    if (finalTitle) formData.append('title', finalTitle);
+    if (finalArtist) formData.append('artist', finalArtist);
+    if (finalPlaylistId !== null && finalPlaylistId !== undefined && finalPlaylistId !== '') {
+      formData.append('playlist_id', String(finalPlaylistId));
+    }
+
+    return apiRequest('/songs/upload', {
+      method: 'POST',
+      body: formData
+    });
+  },
+
+  async update(songId, data) {
+    return apiRequest(`/songs/${songId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data)
+    });
+  },
+
+  async delete(songId) {
+    return apiRequest(`/songs/${songId}`, {
+      method: 'DELETE'
+    });
+  },
+
+  getAudioUrl(songId) {
+    return `${API_BASE}/songs/${songId}/audio`;
+  },
+
+  async getWaveform(songId, points = 500) {
+    return apiRequest(`/songs/${songId}/waveform?points=${points}`);
+  },
+
+  async getSequence(songId) {
+    return apiRequest(`/songs/${songId}/sequence`);
+  },
+
+  async saveSequence(songId, sequenceData, activateCustom = true) {
+    const payload = {
+      timing_ms: sequenceData.timing_ms || 50,
+      num_channels: sequenceData.num_channels || sequenceData.channels || 8,
+      brightness_range: sequenceData.brightness_range || 255,
+      sequence_mode: activateCustom ? 'custom' : undefined,
+      steps: sequenceData.steps || sequenceData.frames || []
+    };
+    return apiRequest(`/songs/${songId}/sequence`, {
+      method: 'PUT',
+      body: JSON.stringify(payload)
+    });
+  },
+
+  async deleteSequence(songId) {
+    return apiRequest(`/songs/${songId}/sequence`, {
+      method: 'DELETE'
+    });
+  },
+
+  async generateSequenceFromFft(songId, timingMs = 50, activateCustom = true) {
+    return apiRequest(`/songs/${songId}/sequence/generate-fft`, {
+      method: 'POST',
+      body: JSON.stringify({
+        timing_ms: timingMs,
+        activate_custom: activateCustom
+      })
+    });
+  }
+};
+
+// =============================================================================
+// Playlists API
+// =============================================================================
+
+export const playlists = {
+  async list() {
+    return apiRequest('/playlists');
+  },
+
+  async get(playlistId) {
+    return apiRequest(`/playlists/${playlistId}`);
+  },
+
+  async create({ name, songIds = [], isActive = false }) {
+    return apiRequest('/playlists', {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        song_ids: songIds,
+        is_active: isActive
+      })
+    });
+  },
+
+  async update(playlistId, { name, songIds, isActive }) {
+    const body = {};
+    if (name !== undefined) body.name = name;
+    if (songIds !== undefined) body.song_ids = songIds;
+    if (isActive !== undefined) body.is_active = isActive;
+
+    return apiRequest(`/playlists/${playlistId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body)
+    });
+  },
+
+  async activate(playlistId) {
+    return apiRequest(`/playlists/${playlistId}/activate`, {
+      method: 'POST'
+    });
+  },
+
+  async addSong(playlistId, songId) {
+    return apiRequest(`/playlists/${playlistId}/songs`, {
+      method: 'POST',
+      body: JSON.stringify({ song_id: songId })
+    });
+  },
+
+  async removeSong(playlistId, songId) {
+    return apiRequest(`/playlists/${playlistId}/songs/${songId}`, {
+      method: 'DELETE'
+    });
+  },
+
+  async reorderSongs(playlistId, songIds) {
+    return apiRequest(`/playlists/${playlistId}/reorder`, {
+      method: 'PUT',
+      body: JSON.stringify({ song_ids: songIds })
+    });
+  },
+
+  async delete(playlistId) {
+    return apiRequest(`/playlists/${playlistId}`, {
+      method: 'DELETE'
     });
   }
 };

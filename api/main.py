@@ -3,17 +3,14 @@ LightShowPi Neo - FastAPI Backend
 
 Main application file for the optional FastAPI backend that provides
 web UI, scheduling, analytics, and remote control capabilities.
-
-This backend is OPTIONAL - LightShowPi can run without it using the
-traditional CLI/cron/button control methods.
 """
 
 import os
 import sys
+import time
 import logging
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
 # Add py directory to path
@@ -25,10 +22,11 @@ from api.core.auth import AuthManager
 from api.models.schemas import (
     UserLogin, Token, SystemHealth, LightshowState
 )
-from api.routers import lightshow, schedules, buttons
+from api.routers import lightshow, schedules, buttons, songs, playlists
 from api.services.lightshow_manager import LightshowManager
 from api.services.scheduler import SchedulerService
 from api.services.button_manager import ButtonManagerService
+from api.services.media_service import MediaService, set_media_service
 
 # Configure logging
 logging.basicConfig(
@@ -44,21 +42,18 @@ api_config = None
 lightshow_manager = None
 scheduler_service = None
 button_manager = None
+media_service = None
 
 # API version
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Lifecycle manager for FastAPI app.
+    """Lifecycle manager for FastAPI app."""
+    global db, auth_manager, api_config, lightshow_manager, scheduler_service, button_manager, media_service
 
-    Handles startup and shutdown tasks.
-    """
-    global db, auth_manager, api_config, lightshow_manager, scheduler_service, button_manager
-
-    # Startup
+    app.state.start_time = time.time()
     log.info("Starting LightShowPi Neo API...")
 
     # Load configuration
@@ -66,7 +61,6 @@ async def lifespan(app: FastAPI):
 
     if not api_config.enabled:
         log.warning("API is not enabled in configuration. Set api.enabled=true to use the API.")
-        log.warning("LightShowPi will continue to work in traditional mode.")
 
     # Initialize database
     db = init_database(api_config.db_path if api_config.db_path else None)
@@ -79,11 +73,15 @@ async def lifespan(app: FastAPI):
         user_count = cursor.fetchone()[0]
 
         if user_count == 0:
-            # Create default admin user
             default_password = os.getenv("ADMIN_PASSWORD", "admin123")
             auth_manager.create_user("admin", default_password)
             log.warning(f"Created default admin user with password '{default_password}'")
             log.warning("PLEASE CHANGE THIS PASSWORD IMMEDIATELY!")
+
+    # Initialize media service (songs, playlists, custom sequences)
+    media_service = MediaService(db, api_config)
+    set_media_service(media_service)
+    log.info("Media service initialized")
 
     # Initialize lightshow manager
     lightshow_manager = LightshowManager(api_config)
@@ -92,7 +90,7 @@ async def lifespan(app: FastAPI):
     # Initialize button manager
     button_config = {
         'button_manager': {
-            'enabled': True,  # Can be overridden by config
+            'enabled': True,
             'audio_timeout': 300,
             'cooldown': 5
         }
@@ -114,12 +112,10 @@ async def lifespan(app: FastAPI):
     # Shutdown
     log.info("Shutting down LightShowPi Neo API...")
 
-    # Stop scheduler
     if scheduler_service:
         scheduler_service.stop()
         log.info("Scheduler service stopped")
 
-    # Stop lightshow if running
     if lightshow_manager:
         lightshow_manager.stop(graceful=True)
 
@@ -135,7 +131,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure this in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -145,9 +141,10 @@ app.add_middleware(
 app.include_router(lightshow.router)
 app.include_router(schedules.router)
 app.include_router(buttons.router)
+app.include_router(songs.router)
+app.include_router(playlists.router)
 
 
-# Dependency to get database
 def get_db():
     """Dependency for getting database instance."""
     global db
@@ -159,29 +156,17 @@ def get_db():
     return db
 
 
-# Dependency to get auth manager
-def get_auth_manager(database = Depends(get_db)):
+def get_auth_manager(database=Depends(get_db)):
     """Dependency for getting auth manager."""
     return AuthManager(database)
 
-
-# ============================================================================
-# Authentication Endpoints
-# ============================================================================
 
 @app.post("/api/auth/login", response_model=Token, tags=["Authentication"])
 async def login(
     credentials: UserLogin,
     auth_mgr: AuthManager = Depends(get_auth_manager)
 ):
-    """
-    Authenticate and receive a JWT token.
-
-    **Security:**
-    - Passwords are hashed with bcrypt
-    - JWT tokens expire after 24 hours
-    - Optional IP whitelisting per user
-    """
+    """Authenticate and receive a JWT token."""
     user = auth_mgr.authenticate_user(
         credentials.username,
         credentials.password
@@ -194,7 +179,6 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Create access token
     access_token = auth_mgr.create_access_token(
         data={"sub": user['username'], "user_id": user['id']}
     )
@@ -202,39 +186,29 @@ async def login(
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-# ============================================================================
-# Health Check Endpoint
-# ============================================================================
-
 @app.get("/api/health", response_model=SystemHealth, tags=["System"])
 async def health_check():
-    """
-    Get system health status.
-
-    This endpoint does not require authentication and can be used
-    for monitoring and health checks.
-    """
-    import time
+    """Get system health status."""
     start_time = getattr(app.state, 'start_time', time.time())
+    state_val = LightshowState.IDLE
+    if lightshow_manager:
+        try:
+            state_val = LightshowState(lightshow_manager.get_status()["state"])
+        except Exception:
+            state_val = LightshowState.IDLE
 
     return {
         "api_version": API_VERSION,
         "uptime": time.time() - start_time,
-        "lightshow_state": LightshowState.IDLE,  # TODO: Get actual state
+        "lightshow_state": state_val,
         "database_ok": db is not None,
-        "clients_online": 0  # TODO: Get actual count
+        "clients_online": 0
     }
 
 
-# ============================================================================
-# Root Endpoint
-# ============================================================================
-
 @app.get("/", tags=["Info"])
 async def root():
-    """
-    API information endpoint.
-    """
+    """API information endpoint."""
     return {
         "name": "LightShowPi Neo API",
         "version": API_VERSION,
@@ -246,7 +220,6 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
 
-    # Load config to get port
     config = get_api_config()
 
     if not config.enabled:
@@ -261,6 +234,6 @@ if __name__ == "__main__":
         "api.main:app",
         host=config.host,
         port=config.port,
-        reload=False,  # Remove in production
+        reload=False,
         log_level="info"
     )

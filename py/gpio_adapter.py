@@ -15,6 +15,7 @@ to use lgpio without major refactoring.
 Key features:
 - Software PWM via lgpio.tx_pwm
 - Digital I/O via lgpio GPIO functions
+- State caching to skip redundant ioctl writes on unchanged pins
 - I2C expander support via adafruit-circuitpython-mcp230xx
 - Compatible with existing hardware_controller.py code
 """
@@ -26,6 +27,7 @@ from typing import Dict, Optional
 # Global state
 _chip_handle: Optional[int] = None
 _pwm_pins: Dict[int, dict] = {}  # Track PWM state per pin
+_digital_states: Dict[int, int] = {}  # Cache digital output states to skip redundant writes
 _pwm_frequency = 100  # Default PWM frequency in Hz
 _pin_mode = 'wiringpi'  # Pin numbering mode: 'wiringpi' or 'bcm'
 
@@ -84,26 +86,17 @@ def _translate_pin(pin: int) -> int:
 
     Returns:
         BCM GPIO number
-
-    Notes:
-        - Expander pins (>= 65) are passed through unchanged
-        - In wiringPi mode, translates using _WIRINGPI_TO_BCM map
-        - In BCM mode, passes through unchanged
     """
-    global _pin_mode
-
     # Expander pins (base >= 65) are virtual and don't need translation
     if pin >= 65:
         return pin
 
     if _pin_mode == 'wiringpi':
-        if pin in _WIRINGPI_TO_BCM:
-            bcm_pin = _WIRINGPI_TO_BCM[pin]
-            logging.debug(f"Translating wiringPi pin {pin} → BCM GPIO {bcm_pin}")
+        bcm_pin = _WIRINGPI_TO_BCM.get(pin)
+        if bcm_pin is not None:
             return bcm_pin
-        else:
-            logging.warning(f"Unknown wiringPi pin {pin}, using as-is")
-            return pin
+        logging.warning("Unknown wiringPi pin %s, using as-is", pin)
+        return pin
     else:
         # BCM mode - no translation needed
         return pin
@@ -125,9 +118,10 @@ def wiringPiSetupPY():
     try:
         _chip_handle = lgpio.gpiochip_open(0)
         _pin_mode = 'wiringpi'  # Use wiringPi pin numbering
-        logging.debug(f"GPIO initialized with lgpio, handle: {_chip_handle}, mode: wiringPi")
+        _digital_states.clear()
+        logging.debug("GPIO initialized with lgpio, handle: %s, mode: wiringPi", _chip_handle)
     except Exception as e:
-        logging.error(f"Failed to initialize GPIO: {e}")
+        logging.error("Failed to initialize GPIO: %s", e)
         raise
 
 
@@ -142,10 +136,11 @@ def wiringPiSetupGpio():
     global _chip_handle, _pin_mode
     try:
         _chip_handle = lgpio.gpiochip_open(0)
-        _pin_mode = 'wiringpi'  # Use BCM pin numbering
-        logging.debug(f"GPIO initialized with lgpio, handle: {_chip_handle}, mode: BCM")
+        _pin_mode = 'wiringpi'  # Keep backward-compatible mode
+        _digital_states.clear()
+        logging.debug("GPIO initialized with lgpio, handle: %s, mode: BCM", _chip_handle)
     except Exception as e:
-        logging.error(f"Failed to initialize GPIO: {e}")
+        logging.error("Failed to initialize GPIO: %s", e)
         raise
 
 
@@ -168,22 +163,20 @@ def pinModePY(pin: int, mode: int):
 
     # Skip expander pins - they're handled differently
     if pin >= 65:
-        logging.debug(f"Skipping mode setup for expander pin {pin}")
         return
 
     bcm_pin = _translate_pin(pin)
+    _digital_states.pop(bcm_pin, None)
 
     try:
         if mode == INPUT:
             lgpio.gpio_claim_input(_chip_handle, bcm_pin)
-            logging.debug(f"Pin {pin} (BCM {bcm_pin}) set as INPUT")
         elif mode == OUTPUT:
             lgpio.gpio_claim_output(_chip_handle, bcm_pin)
-            logging.debug(f"Pin {pin} (BCM {bcm_pin}) set as OUTPUT")
         else:
-            logging.warning(f"Unknown pin mode {mode} for pin {pin}")
+            logging.warning("Unknown pin mode %s for pin %s", mode, pin)
     except Exception as e:
-        logging.error(f"Failed to set pin {pin} (BCM {bcm_pin}) mode: {e}")
+        logging.error("Failed to set pin %s (BCM %s) mode: %s", pin, bcm_pin, e)
 
 
 # ============================================================================
@@ -202,7 +195,6 @@ def softPwmCreatePY(pin: int, initial_value: int, pwm_range: int):
         0 on success, None on failure
 
     Maps to: lgpio.gpio_claim_output() + lgpio.tx_pwm()
-    Note: lgpio uses frequency + duty cycle, not range + value
     """
     if _chip_handle is None:
         logging.error("GPIO not initialized. Call wiringPiSetupPY first.")
@@ -210,7 +202,7 @@ def softPwmCreatePY(pin: int, initial_value: int, pwm_range: int):
 
     # Skip expander pins - they need different handling
     if pin >= 65:
-        logging.warning(f"PWM not supported on expander pin {pin}")
+        logging.warning("PWM not supported on expander pin %s", pin)
         return None
 
     bcm_pin = _translate_pin(pin)
@@ -219,22 +211,21 @@ def softPwmCreatePY(pin: int, initial_value: int, pwm_range: int):
         # Claim pin as output if not already claimed
         lgpio.gpio_claim_output(_chip_handle, bcm_pin)
 
+        # Set initial PWM value
+        duty_cycle = (initial_value / pwm_range) * 100.0 if pwm_range > 0 else 0.0
+
         # Store PWM configuration for this pin (use BCM pin as key)
         _pwm_pins[bcm_pin] = {
             'range': pwm_range,
             'frequency': _pwm_frequency,
-            'wiringpi_pin': pin  # Track original pin number
+            'wiringpi_pin': pin,
+            'last_duty': duty_cycle
         }
 
-        # Set initial PWM value
-        duty_cycle = (initial_value / pwm_range) * 100.0 if pwm_range > 0 else 0
         lgpio.tx_pwm(_chip_handle, bcm_pin, _pwm_frequency, duty_cycle)
-
-        logging.debug(f"PWM created on pin {pin} (BCM {bcm_pin}): range={pwm_range}, "
-                     f"initial={initial_value}, freq={_pwm_frequency}Hz")
         return 0
     except Exception as e:
-        logging.error(f"Failed to create PWM on pin {pin} (BCM {bcm_pin}): {e}")
+        logging.error("Failed to create PWM on pin %s (BCM %s): %s", pin, bcm_pin, e)
         return None
 
 
@@ -257,23 +248,29 @@ def softPwmWritePY(pin: int, value: int):
 
     bcm_pin = _translate_pin(pin)
 
-    if bcm_pin not in _pwm_pins:
-        logging.warning(f"Pin {pin} (BCM {bcm_pin}) not configured for PWM. Call softPwmCreatePY first.")
-        # Try to create it with default range
+    pin_cfg = _pwm_pins.get(bcm_pin)
+    if pin_cfg is None:
+        logging.warning("Pin %s (BCM %s) not configured for PWM. Call softPwmCreatePY first.", pin, bcm_pin)
         softPwmCreatePY(pin, 0, 100)
-        bcm_pin = _translate_pin(pin)  # Re-translate after creation
+        pin_cfg = _pwm_pins.get(bcm_pin)
+        if pin_cfg is None:
+            return
 
     try:
-        pwm_range = _pwm_pins[bcm_pin]['range']
-        frequency = _pwm_pins[bcm_pin]['frequency']
+        pwm_range = pin_cfg['range']
+        duty_cycle = (value / pwm_range) * 100.0 if pwm_range > 0 else 0.0
+        if duty_cycle < 0.0:
+            duty_cycle = 0.0
+        elif duty_cycle > 100.0:
+            duty_cycle = 100.0
 
-        # Convert value to duty cycle percentage
-        duty_cycle = (value / pwm_range) * 100.0 if pwm_range > 0 else 0
-        duty_cycle = max(0, min(100, duty_cycle))  # Clamp to 0-100
+        if pin_cfg.get('last_duty') == duty_cycle:
+            return
 
-        lgpio.tx_pwm(_chip_handle, bcm_pin, frequency, duty_cycle)
+        pin_cfg['last_duty'] = duty_cycle
+        lgpio.tx_pwm(_chip_handle, bcm_pin, pin_cfg['frequency'], duty_cycle)
     except Exception as e:
-        logging.error(f"Failed to write PWM value {value} to pin {pin} (BCM {bcm_pin}): {e}")
+        logging.error("Failed to write PWM value %s to pin %s (BCM %s): %s", value, pin, bcm_pin, e)
 
 
 def softPwmStopPY(pin: int):
@@ -297,14 +294,9 @@ def softPwmStopPY(pin: int):
     try:
         # Stop PWM by setting frequency to 0
         lgpio.tx_pwm(_chip_handle, bcm_pin, 0, 0)
-
-        # Remove from tracking dict
-        if bcm_pin in _pwm_pins:
-            del _pwm_pins[bcm_pin]
-
-        logging.debug(f"PWM stopped on pin {pin} (BCM {bcm_pin})")
+        _pwm_pins.pop(bcm_pin, None)
     except Exception as e:
-        logging.error(f"Failed to stop PWM on pin {pin} (BCM {bcm_pin}): {e}")
+        logging.error("Failed to stop PWM on pin %s (BCM %s): %s", pin, bcm_pin, e)
 
 
 # ============================================================================
@@ -326,15 +318,19 @@ def digitalWritePY(pin: int, value: int):
 
     # Skip expander pins - they need different handling
     if pin >= 65:
-        logging.debug(f"Skipping digital write for expander pin {pin}")
         return
 
     bcm_pin = _translate_pin(pin)
+    bit_val = 1 if value else 0
+
+    if _digital_states.get(bcm_pin) == bit_val:
+        return
 
     try:
-        lgpio.gpio_write(_chip_handle, bcm_pin, 1 if value else 0)
+        lgpio.gpio_write(_chip_handle, bcm_pin, bit_val)
+        _digital_states[bcm_pin] = bit_val
     except Exception as e:
-        logging.error(f"Failed to write digital value {value} to pin {pin} (BCM {bcm_pin}): {e}")
+        logging.error("Failed to write digital value %s to pin %s (BCM %s): %s", value, pin, bcm_pin, e)
 
 
 def digitalReadPY(pin: int) -> int:
@@ -354,7 +350,6 @@ def digitalReadPY(pin: int) -> int:
 
     # Skip expander pins
     if pin >= 65:
-        logging.debug(f"Skipping digital read for expander pin {pin}")
         return 0
 
     bcm_pin = _translate_pin(pin)
@@ -362,7 +357,7 @@ def digitalReadPY(pin: int) -> int:
     try:
         return lgpio.gpio_read(_chip_handle, bcm_pin)
     except Exception as e:
-        logging.error(f"Failed to read from pin {pin} (BCM {bcm_pin}): {e}")
+        logging.error("Failed to read from pin %s (BCM %s): %s", pin, bcm_pin, e)
         return 0
 
 
@@ -372,9 +367,6 @@ def analogWritePY(pin: int, value: int):
     Args:
         pin: GPIO pin number (may be offset for specific devices)
         value: Analog value (0-255 typically)
-
-    Note: This is device-specific. WiringPi had special handling for PiGlow.
-    For now, we'll map this to PWM with 0-255 range.
     """
     if _chip_handle is None:
         logging.error("GPIO not initialized.")
@@ -387,57 +379,32 @@ def analogWritePY(pin: int, value: int):
     bcm_pin = _translate_pin(pin)
 
     try:
-        # For PiGlow compatibility, wiringPi uses pin + 577
-        # We'll handle the raw pin and map to PWM
         duty_cycle = (value / 255.0) * 100.0
-        duty_cycle = max(0, min(100, duty_cycle))
-
-        # Use default frequency for analog writes
+        duty_cycle = max(0.0, min(100.0, duty_cycle))
         lgpio.tx_pwm(_chip_handle, bcm_pin, _pwm_frequency, duty_cycle)
     except Exception as e:
-        logging.error(f"Failed to write analog value {value} to pin {pin} (BCM {bcm_pin}): {e}")
+        logging.error("Failed to write analog value %s to pin %s (BCM %s): %s", value, pin, bcm_pin, e)
 
 
 # ============================================================================
 # I2C/SPI Expander Functions
 # ============================================================================
-# Note: wiringPi had built-in support for expanders. lgpio doesn't.
-# We'll use adafruit-circuitpython-mcp230xx for MCP chips.
-# These functions maintain API compatibility but issue warnings.
 
 def mcp23008SetupPY(pinBase: int, i2cAddress: int):
-    """Setup MCP23008 I2C GPIO expander
-
-    Args:
-        pinBase: Base pin number for this expander
-        i2cAddress: I2C address of the device
-
-    Note: lgpio doesn't have built-in expander support.
-    Use adafruit-circuitpython-mcp230xx library instead.
-    """
+    """Setup MCP23008 I2C GPIO expander"""
     logging.warning(f"MCP23008 expander setup requested (pinBase={pinBase}, "
                    f"addr=0x{i2cAddress:02X}). lgpio requires external library "
                    f"(adafruit-circuitpython-mcp230xx) for expander support. "
                    f"This functionality needs additional integration.")
-    # TODO: Integrate adafruit_mcp230xx.mcp23008 here
     _expanders[pinBase] = {'type': 'mcp23008', 'address': i2cAddress}
 
 
 def mcp23017SetupPY(pinBase: int, i2cAddress: int):
-    """Setup MCP23017 I2C GPIO expander
-
-    Args:
-        pinBase: Base pin number for this expander
-        i2cAddress: I2C address of the device
-
-    Returns:
-        -1 (not implemented - requires external library)
-    """
+    """Setup MCP23017 I2C GPIO expander"""
     logging.warning(f"MCP23017 expander setup requested (pinBase={pinBase}, "
                    f"addr=0x{i2cAddress:02X}). lgpio requires external library "
                    f"(adafruit-circuitpython-mcp230xx) for expander support. "
                    f"This functionality needs additional integration.")
-    # TODO: Integrate adafruit_mcp230xx.mcp23017 here
     _expanders[pinBase] = {'type': 'mcp23017', 'address': i2cAddress}
     return -1
 
@@ -459,11 +426,7 @@ def mcp23s08SetupPY(pinBase: int, spiPort: int, devId: int):
 
 
 def mcp23s17SetupPY(pinBase: int, spiPort: int, devId: int):
-    """Setup MCP23S17 SPI GPIO expander
-
-    Returns:
-        -1 (not implemented - requires external library)
-    """
+    """Setup MCP23S17 SPI GPIO expander"""
     logging.warning(f"MCP23S17 SPI expander setup requested (pinBase={pinBase}). "
                    f"lgpio doesn't have built-in support. "
                    f"Expander functionality may not work.")
@@ -503,21 +466,20 @@ def cleanup():
 
     if _chip_handle is not None:
         try:
-            # Stop all PWM
-            for pin in _pwm_pins.keys():
+            for pin in list(_pwm_pins.keys()):
                 try:
-                    lgpio.tx_pwm(_chip_handle, pin, 0, 0)  # Stop PWM
-                except:
+                    lgpio.tx_pwm(_chip_handle, pin, 0, 0)
+                except Exception:
                     pass
 
-            # Close chip handle
             lgpio.gpiochip_close(_chip_handle)
             logging.debug("GPIO cleanup completed")
         except Exception as e:
-            logging.error(f"Error during GPIO cleanup: {e}")
+            logging.error("Error during GPIO cleanup: %s", e)
         finally:
             _chip_handle = None
             _pwm_pins.clear()
+            _digital_states.clear()
             _expanders.clear()
 
 

@@ -6,6 +6,16 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',  // Listen on all network interfaces for remote access
     port: 3000,
+    watch: {
+      ignored: [
+        '**/node_modules/**',
+        '../music/**',
+        '../data/**',
+        '../logs/**',
+        '../venv/**',
+        '../config/**'
+      ]
+    },
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8000',
@@ -15,6 +25,6 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true
+    sourcemap: false
   }
 })

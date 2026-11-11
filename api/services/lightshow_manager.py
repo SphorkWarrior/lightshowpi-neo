@@ -42,12 +42,6 @@ class LightshowManager:
     """
 
     def __init__(self, config: APIConfig):
-        """
-        Initialize lightshow manager.
-
-        Args:
-            config: API configuration instance
-        """
         self.config = config
         self.process: Optional[subprocess.Popen] = None
         self.state = LightshowState.IDLE
@@ -71,21 +65,24 @@ class LightshowManager:
 
     def _read_output(self):
         """Read subprocess output in background thread."""
-        if not self.process:
+        if not self.process or not self.process.stdout:
             return
 
         try:
             for line in iter(self.process.stdout.readline, b''):
                 if line:
-                    decoded = line.decode('utf-8').strip()
+                    decoded = line.decode('utf-8', errors='replace').strip()
                     log.info(f"[lightshow] {decoded}")
 
                     # Parse output for current song info
                     if "Playing:" in decoded or "Now playing:" in decoded:
-                        # Extract song name from output
                         parts = decoded.split(":", 1)
                         if len(parts) > 1:
-                            self.current_song = parts[1].strip()
+                            raw_song = parts[1].strip()
+                            # Strip trailing "(... sec) [mode=...]" if present
+                            if " (" in raw_song:
+                                raw_song = raw_song.split(" (", 1)[0].strip()
+                            self.current_song = os.path.basename(raw_song)
         except Exception as e:
             log.error(f"Error reading subprocess output: {e}")
 
@@ -102,7 +99,7 @@ class LightshowManager:
             bool: True if started successfully
         """
         with self.lock:
-            if self.state in [LightshowState.PLAYING, LightshowState.STARTING]:
+            if self.is_running():
                 log.warning("Lightshow already running")
                 return False
 
@@ -120,18 +117,19 @@ class LightshowManager:
 
                 # For non-ambient modes, handle playlist/song
                 if mode and mode == "ambient":
-                    # Ambient mode doesn't need playlist/song
                     pass
                 elif playlist:
+                    playlist = playlist.replace("$SYNCHRONIZED_LIGHTS_HOME", self.home)
                     playlist = os.path.expandvars(playlist)
                     if not os.path.exists(playlist):
                         log.error(f"Playlist file not found: {playlist}")
                         self.state = LightshowState.ERROR
                         self.error_message = f"Playlist file not found: {playlist}"
                         return False
-                    cmd.extend(["--playlist", playlist])
+                    cmd.extend(["--playlist", playlist, "--loop"])
                     self.current_playlist = playlist
                 elif song:
+                    song = song.replace("$SYNCHRONIZED_LIGHTS_HOME", self.home)
                     song = os.path.expandvars(song)
                     if not os.path.exists(song):
                         log.error(f"Song file not found: {song}")
@@ -139,35 +137,36 @@ class LightshowManager:
                         self.error_message = f"Song file not found: {song}"
                         return False
                     cmd.extend(["--file", song])
-                    self.current_song = song
+                    self.current_song = os.path.basename(song)
                 else:
-                    # For playlist mode (default), use default playlist from config
-                    # For other modes (audio-in, stream-in), config provides the mode
                     if not mode or mode == "playlist":
+                        default_playlist = None
                         try:
-                            default_playlist = self.config.lightshow.playlist_path
-                            if default_playlist:
-                                # Expand environment variables in path
-                                default_playlist = os.path.expandvars(default_playlist)
-                                # Validate file exists
-                                if not os.path.exists(default_playlist):
-                                    log.error(f"Default playlist file not found: {default_playlist}")
-                                    self.state = LightshowState.ERROR
-                                    self.error_message = f"Playlist file not found: {default_playlist}"
-                                    return False
-                                cmd.extend(["--playlist", default_playlist])
-                                self.current_playlist = default_playlist
-                            else:
-                                log.error("No playlist or song specified")
+                            from api.services.media_service import get_media_service
+                            active_pl = get_media_service().get_active_playlist()
+                            if active_pl and active_pl.get("file_path"):
+                                default_playlist = active_pl["file_path"]
+                        except Exception:
+                            pass
+
+                        if not default_playlist:
+                            default_playlist = getattr(self.config.lightshow, "playlist_path", None)
+
+                        if default_playlist:
+                            default_playlist = default_playlist.replace("$SYNCHRONIZED_LIGHTS_HOME", self.home)
+                            default_playlist = os.path.expandvars(default_playlist)
+                            if not os.path.exists(default_playlist):
+                                log.error(f"Default playlist file not found: {default_playlist}")
                                 self.state = LightshowState.ERROR
-                                self.error_message = "No playlist or song specified"
+                                self.error_message = f"Playlist file not found: {default_playlist}"
                                 return False
-                        except AttributeError:
-                            log.error("No playlist configured in defaults.cfg")
+                            cmd.extend(["--playlist", default_playlist, "--loop"])
+                            self.current_playlist = default_playlist
+                        else:
+                            log.error("No playlist or song specified")
                             self.state = LightshowState.ERROR
-                            self.error_message = "No playlist configured"
+                            self.error_message = "No playlist or song specified"
                             return False
-                    # For audio-in, stream-in modes, no playlist needed
 
                 log.info(f"Starting lightshow: {' '.join(cmd)}")
 
@@ -184,15 +183,14 @@ class LightshowManager:
                 self.output_thread = Thread(target=self._read_output, daemon=True)
                 self.output_thread.start()
 
-                # Give it a moment to start
-                time.sleep(1)
-
-                # Check if process is still running
-                if self.process.poll() is not None:
-                    log.error("Lightshow process terminated immediately")
-                    self.state = LightshowState.ERROR
-                    self.error_message = "Process terminated immediately"
-                    return False
+                # Wait briefly to verify process did not fail immediately
+                for _ in range(4):
+                    time.sleep(0.1)
+                    if self.process.poll() is not None:
+                        log.error("Lightshow process terminated immediately")
+                        self.state = LightshowState.ERROR
+                        self.error_message = "Process terminated immediately"
+                        return False
 
                 self.state = LightshowState.PLAYING
                 log.info("Lightshow started successfully")
@@ -205,15 +203,7 @@ class LightshowManager:
                 return False
 
     def stop(self, graceful: bool = True) -> bool:
-        """
-        Stop the lightshow.
-
-        Args:
-            graceful: If True, send SIGTERM; if False, send SIGKILL
-
-        Returns:
-            bool: True if stopped successfully
-        """
+        """Stop the lightshow."""
         with self.lock:
             if not self.process:
                 log.warning("No lightshow process running")
@@ -225,10 +215,7 @@ class LightshowManager:
                 log.info(f"Stopping lightshow (graceful={graceful})")
 
                 if graceful:
-                    # Send SIGTERM for graceful shutdown
                     self.process.terminate()
-
-                    # Wait up to 5 seconds for graceful shutdown
                     try:
                         self.process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
@@ -236,7 +223,6 @@ class LightshowManager:
                         self.process.kill()
                         self.process.wait()
                 else:
-                    # Force kill
                     self.process.kill()
                     self.process.wait()
 
@@ -253,16 +239,8 @@ class LightshowManager:
                 return False
 
     def skip(self) -> bool:
-        """
-        Skip to next song.
-
-        Uses the state file to signal skip request.
-
-        Returns:
-            bool: True if skip signal sent successfully
-        """
+        """Skip to next song via state file."""
         try:
-            # Use configuration manager's update_state
             self.config.update_state('play_now', '-1')
             log.info("Skip signal sent via state file")
             return True
@@ -271,19 +249,12 @@ class LightshowManager:
             return False
 
     def is_running(self) -> bool:
-        """
-        Check if lightshow process is running.
-
-        Returns:
-            bool: True if process is running
-        """
+        """Check if lightshow process is running."""
         if not self.process:
             return False
 
-        # Check if process has terminated
         poll = self.process.poll()
         if poll is not None:
-            # Process terminated
             self.process = None
             if self.state == LightshowState.PLAYING:
                 self.state = LightshowState.IDLE
@@ -292,26 +263,21 @@ class LightshowManager:
         return True
 
     def get_status(self) -> Dict[str, Any]:
-        """
-        Get current lightshow status.
-
-        Returns:
-            dict: Status information
-        """
-        # Update state based on process status
+        """Get current lightshow status."""
         running = self.is_running()
 
         if not running and self.state == LightshowState.PLAYING:
             self.state = LightshowState.IDLE
+            self.current_song = None
 
-        # Check state file for current song
-        try:
-            self.config.reload_state()
-            now_playing = self.config.get_state('now_playing', '')
-            if now_playing and now_playing != '0':
-                self.current_song = now_playing
-        except Exception as e:
-            log.warning(f"Could not read state file: {e}")
+        if running:
+            try:
+                self.config.reload_state()
+                now_playing = self.config.get_state('now_playing', '')
+                if now_playing and now_playing not in ('0', '1'):
+                    self.current_song = now_playing
+            except Exception as e:
+                log.debug(f"Could not read state file: {e}")
 
         return {
             "state": self.state.value,
@@ -323,18 +289,13 @@ class LightshowManager:
         }
 
     def restart(self) -> bool:
-        """
-        Restart the lightshow with current settings.
-
-        Returns:
-            bool: True if restarted successfully
-        """
+        """Restart the lightshow with current settings."""
         playlist = self.current_playlist
 
         if not self.stop():
             return False
 
-        time.sleep(1)
+        time.sleep(0.5)
 
         return self.start(playlist=playlist)
 
@@ -350,15 +311,7 @@ _manager_lock = Lock()
 
 
 def get_lightshow_manager(config: Optional[APIConfig] = None) -> LightshowManager:
-    """
-    Get or create the global lightshow manager instance.
-
-    Args:
-        config: Optional API config (required on first call)
-
-    Returns:
-        LightshowManager: Global manager instance
-    """
+    """Get or create the global lightshow manager instance."""
     global _lightshow_manager
 
     with _manager_lock:
@@ -372,41 +325,9 @@ def get_lightshow_manager(config: Optional[APIConfig] = None) -> LightshowManage
 
 
 def set_lightshow_manager(manager: LightshowManager) -> None:
-    """
-    Set the global lightshow manager instance.
-
-    This is used during application startup to inject the manager instance.
-
-    Args:
-        manager: LightshowManager instance to set as global
-    """
+    """Set the global lightshow manager instance."""
     global _lightshow_manager
 
     with _manager_lock:
         _lightshow_manager = manager
         log.info("Global lightshow manager set")
-
-
-if __name__ == "__main__":
-    # Test the manager
-    logging.basicConfig(level=logging.INFO)
-
-    from api.core.config import get_api_config
-
-    config = get_api_config()
-    manager = LightshowManager(config)
-
-    print("Status:", manager.get_status())
-    print("\nStarting lightshow...")
-    manager.start()
-
-    print("Status:", manager.get_status())
-    time.sleep(5)
-
-    print("\nSkipping song...")
-    manager.skip()
-    time.sleep(3)
-
-    print("\nStopping lightshow...")
-    manager.stop()
-    print("Status:", manager.get_status())
